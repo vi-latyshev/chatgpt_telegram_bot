@@ -20,7 +20,7 @@ OPENAI_COMPLETION_OPTIONS = {
     "top_p": 1,
     "frequency_penalty": 0,
     "presence_penalty": 0,
-    "request_timeout": 60.0,
+    "request_timeout": 120.0,
 }
 
 
