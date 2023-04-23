@@ -12,8 +12,52 @@ class Database:
         self.client = pymongo.MongoClient(config.mongodb_uri)
         self.db = self.client["chatgpt_telegram_bot"]
 
+        self.user_allowed = self.db['user_allowed']
         self.user_collection = self.db["user"]
         self.dialog_collection = self.db["dialog"]
+
+        for user_id in config.admins_telegram_user_ids:
+            self.add_allowed_user(user_id)
+
+    def check_if_user_allowed(
+        self,
+        user_id: int,
+        raise_exception: bool = False
+    ):
+        count = self.user_allowed.count_documents({"_id": user_id})
+
+        if count > 0:
+            return True
+        else:
+            if raise_exception:
+                raise pymongo.mon(f"User {user_id} does not allowed")
+            else:
+                return False
+
+    def add_allowed_user(self, user_id: int):
+        user_allowed_dict = {
+            "_id": user_id,
+            "username": "",
+        }
+
+        if not self.check_if_user_allowed(user_id):
+            self.user_allowed.insert_one(user_allowed_dict)
+
+    def set_allowed_user_attribute(self, user_id: int, key: str, value: Any):
+        self.check_if_user_allowed(user_id, raise_exception=True)
+        self.user_allowed.update_one({"_id": user_id}, {"$set": {key: value}})
+
+    def get_user_allowed_attribute(self, user_id: int, key: str):
+        user_dict = self.user_allowed.find_one({"_id": user_id})
+
+        if user_dict is None or key not in user_dict:
+            return None
+
+        return user_dict[key]
+
+    def remove_allowed_user(self, user_id: int):
+        if self.check_if_user_allowed(user_id):
+            self.user_allowed.delete_one({"_id": user_id})
 
     def check_if_user_exists(self, user_id: int, raise_exception: bool = False):
         if self.user_collection.count_documents({"_id": user_id}) > 0:

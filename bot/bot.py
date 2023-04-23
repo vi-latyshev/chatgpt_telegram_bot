@@ -6,6 +6,7 @@ import html
 import json
 from datetime import datetime
 import openai
+import uuid
 
 import telegram
 from telegram import (
@@ -13,6 +14,10 @@ from telegram import (
     User,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    KeyboardButtonRequestUser,
+    ReplyKeyboardRemove,
     BotCommand
 )
 from telegram.ext import (
@@ -68,6 +73,11 @@ def split_text_into_chunks(text, chunk_size):
     for i in range(0, len(text), chunk_size):
         yield text[i:i + chunk_size]
 
+async def check_if_user_allowed(update: Update, context: CallbackContext, user: User):
+    if update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id:
+        return True
+
+    return db.check_if_user_allowed(user.id)
 
 async def register_user_if_not_exists(update: Update, context: CallbackContext, user: User):
     if not db.check_if_user_exists(user.id):
@@ -79,6 +89,10 @@ async def register_user_if_not_exists(update: Update, context: CallbackContext, 
             last_name= user.last_name
         )
         db.start_new_dialog(user.id)
+
+    username_allowed = db.get_user_allowed_attribute(user.id, "username")
+    if username_allowed is None or len(username_allowed) == 0:
+        db.set_allowed_user_attribute(user.id, "username", user.username or "")
 
     if db.get_user_attribute(user.id, "current_dialog_id") is None:
         db.start_new_dialog(user.id)
@@ -129,6 +143,9 @@ async def is_bot_mentioned(update: Update, context: CallbackContext):
 
 
 async def start_handle(update: Update, context: CallbackContext):
+    if not await check_if_user_allowed(update, context, update.message.from_user):
+        return
+
     await register_user_if_not_exists(update, context, update.message.from_user)
     user_id = update.message.from_user.id
 
@@ -143,6 +160,9 @@ async def start_handle(update: Update, context: CallbackContext):
 
 
 async def help_handle(update: Update, context: CallbackContext):
+    if not await check_if_user_allowed(update, context, update.message.from_user):
+        return
+
     await register_user_if_not_exists(update, context, update.message.from_user)
     user_id = update.message.from_user.id
     db.set_user_attribute(user_id, "last_interaction", datetime.now())
@@ -150,6 +170,9 @@ async def help_handle(update: Update, context: CallbackContext):
 
 
 async def help_group_chat_handle(update: Update, context: CallbackContext):
+     if not await check_if_user_allowed(update, context, update.message.from_user):
+         return
+
      await register_user_if_not_exists(update, context, update.message.from_user)
      user_id = update.message.from_user.id
      db.set_user_attribute(user_id, "last_interaction", datetime.now())
@@ -161,6 +184,9 @@ async def help_group_chat_handle(update: Update, context: CallbackContext):
 
 
 async def retry_handle(update: Update, context: CallbackContext):
+    if not await check_if_user_allowed(update, context, update.message.from_user):
+        return
+
     await register_user_if_not_exists(update, context, update.message.from_user)
     if await is_previous_message_not_answered_yet(update, context): return
 
@@ -193,6 +219,9 @@ async def message_handle(update: Update, context: CallbackContext, message=None,
     # remove bot mention (in group chats)
     if update.message.chat.type != "private":
         _message = _message.replace("@" + context.bot.username, "").strip()
+
+    if not await check_if_user_allowed(update, context, update.message.from_user):
+        return
 
     await register_user_if_not_exists(update, context, update.message.from_user)
     if await is_previous_message_not_answered_yet(update, context): return
@@ -315,6 +344,9 @@ async def message_handle(update: Update, context: CallbackContext, message=None,
 
 
 async def is_previous_message_not_answered_yet(update: Update, context: CallbackContext):
+    if not await check_if_user_allowed(update, context, update.message.from_user):
+        return
+
     await register_user_if_not_exists(update, context, update.message.from_user)
 
     user_id = update.message.from_user.id
@@ -330,6 +362,9 @@ async def is_previous_message_not_answered_yet(update: Update, context: Callback
 async def voice_message_handle(update: Update, context: CallbackContext):
     # check if bot was mentioned (for group chats)
     if not await is_bot_mentioned(update, context):
+        return
+
+    if not await check_if_user_allowed(update, context, update.message.from_user):
         return
 
     await register_user_if_not_exists(update, context, update.message.from_user)
@@ -358,6 +393,9 @@ async def voice_message_handle(update: Update, context: CallbackContext):
 
 
 async def generate_image_handle(update: Update, context: CallbackContext, message=None):
+    if not await check_if_user_allowed(update, context, update.message.from_user):
+        return
+
     await register_user_if_not_exists(update, context, update.message.from_user)
     if await is_previous_message_not_answered_yet(update, context): return
 
@@ -387,6 +425,9 @@ async def generate_image_handle(update: Update, context: CallbackContext, messag
 
 
 async def new_dialog_handle(update: Update, context: CallbackContext):
+    if not await check_if_user_allowed(update, context, update.message.from_user):
+        return
+
     await register_user_if_not_exists(update, context, update.message.from_user)
     if await is_previous_message_not_answered_yet(update, context): return
 
@@ -401,6 +442,9 @@ async def new_dialog_handle(update: Update, context: CallbackContext):
 
 
 async def cancel_handle(update: Update, context: CallbackContext):
+    if not await check_if_user_allowed(update, context, update.message.from_user):
+        return
+
     await register_user_if_not_exists(update, context, update.message.from_user)
 
     user_id = update.message.from_user.id
@@ -451,6 +495,9 @@ def get_chat_mode_menu(page_index: int):
 
 
 async def show_chat_modes_handle(update: Update, context: CallbackContext):
+    if not await check_if_user_allowed(update, context, update.message.from_user):
+        return
+
     await register_user_if_not_exists(update, context, update.message.from_user)
     if await is_previous_message_not_answered_yet(update, context): return
 
@@ -462,6 +509,9 @@ async def show_chat_modes_handle(update: Update, context: CallbackContext):
 
 
 async def show_chat_modes_callback_handle(update: Update, context: CallbackContext):
+     if not await check_if_user_allowed(update.callback_query, context, update.callback_query.from_user):
+         return
+
      await register_user_if_not_exists(update.callback_query, context, update.callback_query.from_user)
      if await is_previous_message_not_answered_yet(update.callback_query, context): return
 
@@ -484,6 +534,9 @@ async def show_chat_modes_callback_handle(update: Update, context: CallbackConte
 
 
 async def set_chat_mode_handle(update: Update, context: CallbackContext):
+    if not await check_if_user_allowed(update.callback_query, context, update.callback_query.from_user):
+        return
+
     await register_user_if_not_exists(update.callback_query, context, update.callback_query.from_user)
     user_id = update.callback_query.from_user.id
 
@@ -529,6 +582,9 @@ def get_settings_menu(user_id: int):
 
 
 async def settings_handle(update: Update, context: CallbackContext):
+    if not await check_if_user_allowed(update, context, update.message.from_user):
+        return
+
     await register_user_if_not_exists(update, context, update.message.from_user)
     if await is_previous_message_not_answered_yet(update, context): return
 
@@ -540,6 +596,9 @@ async def settings_handle(update: Update, context: CallbackContext):
 
 
 async def set_settings_handle(update: Update, context: CallbackContext):
+    if not await check_if_user_allowed(update.callback_query, context, update.callback_query.from_user):
+        return
+
     await register_user_if_not_exists(update.callback_query, context, update.callback_query.from_user)
     user_id = update.callback_query.from_user.id
 
@@ -559,6 +618,9 @@ async def set_settings_handle(update: Update, context: CallbackContext):
 
 
 async def show_balance_handle(update: Update, context: CallbackContext):
+    if not await check_if_user_allowed(update, context, update.message.from_user):
+        return
+
     await register_user_if_not_exists(update, context, update.message.from_user)
 
     user_id = update.message.from_user.id
@@ -604,6 +666,39 @@ async def show_balance_handle(update: Update, context: CallbackContext):
 
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
+async def add_remove_user_handle(update: Update, context: CallbackContext):
+    request_id = int(update.message.from_user.id - update.message.id)
+
+    request_user = KeyboardButtonRequestUser(request_id, user_is_bot=False)
+    reply_keyboard = [KeyboardButton('Share user for add/remove to using bot', request_user=request_user)]
+    reply_markup = ReplyKeyboardMarkup([reply_keyboard], input_field_placeholder="Share contact", resize_keyboard=True)
+
+    text = f"Share contact for add/remove to using bot:"
+    await update.message.reply_text(text, reply_markup=reply_markup)
+
+
+async def user_shared_handler(update: Update, context: CallbackContext):
+    if not update.message.user_shared:
+        return
+
+    user_id = update.message.user_shared.user_id
+
+    is_allowed_user = db.check_if_user_allowed(user_id)
+
+    text = ''
+
+    if not is_allowed_user:
+        db.add_allowed_user(user_id)
+        text = f"You successfully added user"
+    else:
+        username = db.get_user_allowed_attribute(user_id, "username")
+
+        db.remove_allowed_user(user_id)
+        text = f"You successfully removed user"
+        text += f": {username}" if len(username) > 0 else ""
+
+    await update.message.reply_text(text, reply_markup=ReplyKeyboardRemove(), parse_mode=ParseMode.HTML)
+
 
 async def edited_message_handle(update: Update, context: CallbackContext):
     if update.edited_message.chat.type == "private":
@@ -644,6 +739,7 @@ async def post_init(application: Application):
         BotCommand("/balance", "Show balance"),
         BotCommand("/settings", "Show settings"),
         BotCommand("/help", "Show help message"),
+        BotCommand("/user_allowed", "Add user for availabling to using bot"),
     ])
 
 def run_bot() -> None:
@@ -659,33 +755,36 @@ def run_bot() -> None:
     )
 
     # add handlers
-    user_filter = filters.ALL
-    if len(config.allowed_telegram_usernames) > 0:
-        usernames = [x for x in config.allowed_telegram_usernames if isinstance(x, str)]
-        any_ids = [x for x in config.allowed_telegram_usernames if isinstance(x, int)]
+    admins_filter = filters.ALL
+    if len(config.admins_telegram_user_ids) > 0:
+        usernames = [x for x in config.admins_telegram_user_ids if isinstance(x, str)]
+        any_ids = [x for x in config.admins_telegram_user_ids if isinstance(x, int)]
         user_ids = [x for x in any_ids if x > 0]
         group_ids = [x for x in any_ids if x < 0]
         user_filter = filters.User(username=usernames) | filters.User(user_id=user_ids) | filters.Chat(chat_id=group_ids)
 
-    application.add_handler(CommandHandler("start", start_handle, filters=user_filter))
-    application.add_handler(CommandHandler("help", help_handle, filters=user_filter))
-    application.add_handler(CommandHandler("help_group_chat", help_group_chat_handle, filters=user_filter))
+    application.add_handler(CommandHandler("start", start_handle))
+    application.add_handler(CommandHandler("help", help_handle))
+    application.add_handler(CommandHandler("help_group_chat", help_group_chat_handle))
 
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & user_filter, message_handle))
-    application.add_handler(CommandHandler("retry", retry_handle, filters=user_filter))
-    application.add_handler(CommandHandler("new", new_dialog_handle, filters=user_filter))
-    application.add_handler(CommandHandler("cancel", cancel_handle, filters=user_filter))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handle))
+    application.add_handler(CommandHandler("retry", retry_handle))
+    application.add_handler(CommandHandler("new", new_dialog_handle))
+    application.add_handler(CommandHandler("cancel", cancel_handle))
 
-    application.add_handler(MessageHandler(filters.VOICE & user_filter, voice_message_handle))
+    application.add_handler(MessageHandler(filters.VOICE, voice_message_handle))
 
-    application.add_handler(CommandHandler("mode", show_chat_modes_handle, filters=user_filter))
+    application.add_handler(CommandHandler("mode", show_chat_modes_handle))
     application.add_handler(CallbackQueryHandler(show_chat_modes_callback_handle, pattern="^show_chat_modes"))
     application.add_handler(CallbackQueryHandler(set_chat_mode_handle, pattern="^set_chat_mode"))
 
-    application.add_handler(CommandHandler("settings", settings_handle, filters=user_filter))
+    application.add_handler(CommandHandler("settings", settings_handle))
     application.add_handler(CallbackQueryHandler(set_settings_handle, pattern="^set_settings"))
 
-    application.add_handler(CommandHandler("balance", show_balance_handle, filters=user_filter))
+    application.add_handler(CommandHandler("balance", show_balance_handle))
+
+    application.add_handler(MessageHandler(filters.StatusUpdate.USER_SHARED & admins_filter, user_shared_handler))
+    application.add_handler(CommandHandler("user_allowed", add_remove_user_handle, filters=admins_filter))
 
     application.add_error_handler(error_handle)
 
