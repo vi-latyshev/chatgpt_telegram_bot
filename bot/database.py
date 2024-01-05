@@ -28,11 +28,11 @@ class Database:
 
         if count > 0:
             return True
-        else:
-            if raise_exception:
-                raise pymongo.mon(f"User {user_id} does not allowed")
-            else:
-                return False
+
+        if raise_exception:
+            raise pymongo.mon(f"User {user_id} does not allowed")
+
+        return False
 
     def add_allowed_user(self, user_id: int):
         user_allowed_dict = {

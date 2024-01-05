@@ -1,4 +1,4 @@
-FROM python:3.8-slim
+FROM python:3.11-slim
 
 RUN \
     set -eux; \
@@ -20,4 +20,3 @@ COPY . /code
 WORKDIR /code
 
 CMD ["bash"]
-
