@@ -6,7 +6,6 @@ import html
 import json
 from datetime import datetime
 import openai
-import uuid
 
 import telegram
 from telegram import (
@@ -35,6 +34,7 @@ from telegram.constants import ParseMode, ChatAction
 import config
 import database
 import openai_utils
+import files
 
 
 # setup
@@ -69,7 +69,7 @@ For example: "{bot_username} write a poem about Telegram"
 """
 
 
-def split_text_into_chunks(text, chunk_size):
+def split_text_into_chunks(text, chunk_size = 4096):
     for i in range(0, len(text), chunk_size):
         yield text[i:i + chunk_size]
 
@@ -375,7 +375,7 @@ async def voice_message_handle(update: Update, context: CallbackContext):
 
     voice = update.message.voice
     voice_file = await context.bot.get_file(voice.file_id)
-    
+
     # store file in memory, not on disk
     buf = io.BytesIO()
     await voice_file.download_to_memory(buf)
@@ -391,6 +391,135 @@ async def voice_message_handle(update: Update, context: CallbackContext):
 
     await message_handle(update, context, message=transcribed_text)
 
+
+async def attachment_message_handle(update: Update, context: CallbackContext):
+    # check if bot was mentioned (for group chats)
+    if not await is_bot_mentioned(update, context):
+        return
+
+    if not await check_if_user_allowed(update, context, update.message.from_user):
+        return
+
+    await register_user_if_not_exists(update, context, update.message.from_user)
+    if await is_previous_message_not_answered_yet(update, context): return
+
+    user_id = update.message.from_user.id
+
+    current_model = db.get_user_attribute(user_id, "current_model")
+    chat_mode = db.get_user_attribute(user_id, "current_chat_mode")
+
+    placeholder_message = await update.message.reply_text("...")
+
+    if (datetime.now() - db.get_user_attribute(user_id, "last_interaction")).seconds > config.new_dialog_timeout and len(db.get_dialog_messages(user_id)) > 0:
+        db.start_new_dialog(user_id)
+        await update.message.reply_text(f"Starting new dialog due to timeout (<b>{config.chat_modes[chat_mode]['name']}</b> mode) ✅", parse_mode=ParseMode.HTML)
+
+    db.set_user_attribute(user_id, "last_interaction", datetime.now())
+
+    # send typing action
+    await update.message.chat.send_action(action="typing")
+
+    caption = update.message.caption
+    document = update.message.document
+    document_file_name = document.file_name or 'file.txt'
+    document_mime_type = document.mime_type or 'text/plain'
+    document_file = await context.bot.get_file(document.file_id)
+
+    # store file in memory, not on disk
+    buf = io.BytesIO()
+    await document_file.download_to_memory(buf)
+    buf.name = document_file_name
+    buf.seek(0)  # move cursor to the beginning of the buffer
+
+    try:
+        strings_to_summarize, tokens_in_file = files.file_buffer_to_string_array(buf, document_mime_type, current_model)
+
+        config_of_current_model = config.models.get('info', {}).get(current_model, {})
+        price_of_model = config_of_current_model.get('price_per_1000_input_tokens', 0.03)
+        price_for_file = price_of_model * (tokens_in_file / 1000)
+
+        if tokens_in_file > config.max_tokens_in_file:
+            await update.message.reply_text(f'File is too big ({tokens_in_file} tokens / {config.max_tokens_in_file} max allowed), request would be too expensive ({price_for_file}). If you need to increase maximum allowed tokens per file, write to the admins')
+            return
+
+        await update.message.reply_text(f'I\'m summarizing your file please wait; This file will cost at least {price_for_file}$')
+
+        if (caption is not None) and len(caption) > 0:
+            if update.message.chat.type != "private":
+                caption = caption.replace("@" + context.bot.username, "").strip()
+            strings_to_summarize.insert(0, caption)
+
+        if len(strings_to_summarize) > 1:
+            summary, n_first_dialog_messages_removed = await summarize_recursive(user_id, chat_mode, current_model, strings_to_summarize)
+        else:
+            summary, n_first_dialog_messages_removed = await summarize_text(user_id, chat_mode, current_model, strings_to_summarize[0], "")
+
+        for answer_chunk in split_text_into_chunks(summary):
+            try:
+                parse_mode = {
+                    "html": ParseMode.HTML,
+                    "markdown": ParseMode.MARKDOWN
+                }[config.chat_modes[chat_mode]["parse_mode"]]
+
+                await update.message.reply_text(answer_chunk, parse_mode=parse_mode)
+            except telegram.error.BadRequest:
+                # answer has invalid characters, so we send it without parse_mode
+                await update.message.reply_text(answer_chunk)
+
+        # send message if some messages were removed from the context
+        if n_first_dialog_messages_removed > 0:
+            if n_first_dialog_messages_removed == 1:
+                text = "✍️ <i>Note:</i> Your current dialog is too long, so your <b>first message</b> was removed from the context.\n Send /new command to start new dialog"
+            else:
+                text = f"✍️ <i>Note:</i> Your current dialog is too long, so <b>{n_first_dialog_messages_removed} first messages</b> were removed from the context.\n Send /new command to start new dialog"
+            await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+    except ValueError as error:
+        error_text = f"Unfortunately, i couldn\'t read the file. Reason: {error}"
+        logger.error(error_text)
+        await update.message.reply_text(f"🥲 {error_text}")
+    except Exception as error:
+        error_text = f"Something went wrong during completion. Reason: {error}"
+        logger.error(error_text)
+        await update.message.reply_text(error_text)
+    finally:
+        await context.bot.delete_message(chat_id=placeholder_message.chat_id, message_id=placeholder_message.message_id)
+
+
+
+async def summarize_recursive(user_id, chat_mode: str, model: str, array_to_summarize):
+    if len(array_to_summarize) == 1:
+        return array_to_summarize[0], 0
+
+    if len(array_to_summarize) == 2:
+        return await summarize_text(user_id, chat_mode, model, array_to_summarize[0], array_to_summarize[1])
+
+    if len(array_to_summarize) > 2:
+        text1 = await summarize_recursive(user_id, chat_mode, model, array_to_summarize[: len(array_to_summarize) // 2])
+        text2 = await summarize_recursive(user_id, chat_mode, model, array_to_summarize[len(array_to_summarize) // 2:])
+        return await summarize_text(user_id, chat_mode, model, text1, text2)
+
+
+async def summarize_text(user_id: int, chat_mode: str, model: str, text1: str, text2: str):
+    message = str(text1) + str(text2)
+    dialog_messages = db.get_dialog_messages(user_id, dialog_id=None)
+
+    chatgpt_instance = openai_utils.ChatGPT(model=model)
+    answer, (n_input_tokens, n_output_tokens), n_first_dialog_messages_removed = await chatgpt_instance.send_message(
+        message,
+        dialog_messages=dialog_messages,
+        chat_mode=chat_mode
+    )
+
+    new_dialog_message = {"user": message, "bot": answer, "date": datetime.now()}
+    db.set_dialog_messages(
+        user_id,
+        db.get_dialog_messages(user_id, dialog_id=None) + [new_dialog_message],
+        dialog_id=None
+    )
+    db.update_n_used_tokens(user_id, model, n_input_tokens, n_output_tokens)
+
+    return answer, n_first_dialog_messages_removed
 
 async def generate_image_handle(update: Update, context: CallbackContext, message=None):
     if not await check_if_user_allowed(update, context, update.message.from_user):
@@ -667,7 +796,12 @@ async def show_balance_handle(update: Update, context: CallbackContext):
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 async def add_remove_user_handle(update: Update, context: CallbackContext):
+    if not await check_if_user_allowed(update, context, update.message.from_user):
+        return
+
     request_id = int(update.message.from_user.id - update.message.id)
+    request_id = request_id & 0xffffffff
+    request_id = request_id | (-(request_id & 0x80000000))
 
     request_user = KeyboardButtonRequestUser(request_id, user_is_bot=False)
     reply_keyboard = [KeyboardButton('Share user for add/remove to using bot', request_user=request_user)]
@@ -678,6 +812,9 @@ async def add_remove_user_handle(update: Update, context: CallbackContext):
 
 
 async def user_shared_handler(update: Update, context: CallbackContext):
+    if not await check_if_user_allowed(update, context, update.message.from_user):
+        return
+
     if not update.message.user_shared:
         return
 
@@ -722,7 +859,7 @@ async def error_handle(update: Update, context: CallbackContext) -> None:
         )
 
         # split text into multiple messages due to 4096 character limit
-        for message_chunk in split_text_into_chunks(message, 4096):
+        for message_chunk in split_text_into_chunks(message):
             try:
                 await context.bot.send_message(update.effective_chat.id, message_chunk, parse_mode=ParseMode.HTML)
             except telegram.error.BadRequest:
@@ -755,13 +892,6 @@ def run_bot() -> None:
     )
 
     # add handlers
-    admins_filter = filters.ALL
-    if len(config.admins_telegram_user_ids) > 0:
-        usernames = [x for x in config.admins_telegram_user_ids if isinstance(x, str)]
-        any_ids = [x for x in config.admins_telegram_user_ids if isinstance(x, int)]
-        user_ids = [x for x in any_ids if x > 0]
-        group_ids = [x for x in any_ids if x < 0]
-        user_filter = filters.User(username=usernames) | filters.User(user_id=user_ids) | filters.Chat(chat_id=group_ids)
 
     application.add_handler(CommandHandler("start", start_handle))
     application.add_handler(CommandHandler("help", help_handle))
@@ -773,6 +903,7 @@ def run_bot() -> None:
     application.add_handler(CommandHandler("cancel", cancel_handle))
 
     application.add_handler(MessageHandler(filters.VOICE, voice_message_handle))
+    application.add_handler(MessageHandler(filters.ATTACHMENT, attachment_message_handle))
 
     application.add_handler(CommandHandler("mode", show_chat_modes_handle))
     application.add_handler(CallbackQueryHandler(show_chat_modes_callback_handle, pattern="^show_chat_modes"))
@@ -783,8 +914,8 @@ def run_bot() -> None:
 
     application.add_handler(CommandHandler("balance", show_balance_handle))
 
-    application.add_handler(MessageHandler(filters.StatusUpdate.USER_SHARED & admins_filter, user_shared_handler))
-    application.add_handler(CommandHandler("user_allowed", add_remove_user_handle, filters=admins_filter))
+    application.add_handler(MessageHandler(filters.StatusUpdate.USER_SHARED, user_shared_handler))
+    application.add_handler(CommandHandler("user_allowed", add_remove_user_handle))
 
     application.add_error_handler(error_handle)
 
