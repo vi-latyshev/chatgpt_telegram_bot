@@ -68,7 +68,7 @@ def split_text_into_chunks(text, chunk_size):
 
 async def check_if_user_allowed(update: Update, context: CallbackContext, user: User):
     if update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id:
-        return True
+        return False
 
     return db.check_if_user_allowed(user.id)
 
